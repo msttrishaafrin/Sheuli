@@ -4,17 +4,21 @@ import {
   getLastQr,
   isSwitchingAccount,
   getClientInfo,
+  getConnectionDetails,
   logoutWhatsApp
 } from '../whatsapp.js';
 
 const router = Router();
 
 router.get('/status', (req, res) => {
+  const details = getConnectionDetails();
   res.json({
-    status: getConnectionStatus(),
-    info: getClientInfo(),
-    qr: getLastQr(),
-    switchingAccount: isSwitchingAccount()
+    status: details.status,
+    info: details.info,
+    qr: details.qr,
+    loadingPercent: details.loadingPercent,
+    loadingMessage: details.loadingMessage,
+    switchingAccount: details.switchingAccount
   });
 });
 
@@ -30,7 +34,15 @@ router.post('/logout', async (req, res) => {
     return res.status(500).json({ error: result.error || 'Failed to logout WhatsApp account' });
   }
 
-  return res.json({ ok: true, status: getConnectionStatus(), qr: getLastQr() });
+  const details = getConnectionDetails();
+  return res.json({
+    ok: true,
+    status: details.status,
+    qr: details.qr,
+    info: details.info,
+    loadingPercent: details.loadingPercent,
+    loadingMessage: details.loadingMessage
+  });
 });
 
 export default router;

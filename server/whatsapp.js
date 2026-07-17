@@ -31,9 +31,15 @@ const { Client, LocalAuth } = pkg;
 
 let client = null;
 let ioRef = null;
-let connectionStatus = 'initializing'; // initializing | qr | connected | disconnected | auth_failure | logging_out
+let connectionStatus = 'initializing'; // initializing | qr | authenticated | loading | ready | connected | disconnected | auth_failure | logging_out
 let lastQr = null;
 let switchingAccount = false;
+let loadingPercent = 0;
+let loadingMessage = '';
+let startupWatchdog = null;
+let authWatchdog = null;
+let authRetryCount = 0;
+const attachedClients = new WeakSet();
 
 // In-memory de-dup cache (mirrors the processed_messages table for fast-path checks)
 // and a per-contact busy lock so a second incoming message can't trigger a second
@@ -51,7 +57,7 @@ export function isSwitchingAccount() {
 }
 
 export function getClientInfo() {
-  if (connectionStatus !== 'connected' || !client?.info) {
+  if ((connectionStatus !== 'connected' && connectionStatus !== 'ready') || !client?.info) {
     return null;
   }
   const wid = client.info.wid;
@@ -61,10 +67,43 @@ export function getClientInfo() {
   return { number, name, platform };
 }
 
-function emitStatus(status) {
+export function getConnectionDetails() {
+  return {
+    status: connectionStatus,
+    info: getClientInfo(),
+    qr: lastQr,
+    loadingPercent,
+    loadingMessage,
+    switchingAccount
+  };
+}
+
+function emitStatus(status, extra = {}) {
   connectionStatus = status;
-  if (status === 'connected') lastQr = null;
-  ioRef?.emit('whatsapp:status', { status, info: getClientInfo() });
+  if (status === 'qr') {
+    if (extra.qr) lastQr = extra.qr;
+  } else if (
+    status === 'authenticated' ||
+    status === 'loading' ||
+    status === 'ready' ||
+    status === 'connected' ||
+    status === 'logging_out'
+  ) {
+    if (status === 'authenticated' || status === 'loading' || status === 'ready' || status === 'connected') {
+      lastQr = null;
+    }
+  }
+
+  if (status === 'loading') {
+    if (extra.percent !== undefined) loadingPercent = extra.percent;
+    if (extra.message !== undefined) loadingMessage = extra.message;
+  } else if (status !== 'loading' && status !== 'authenticated') {
+    loadingPercent = 0;
+    loadingMessage = '';
+  }
+
+  const payload = getConnectionDetails();
+  ioRef?.emit('whatsapp:status', payload);
 }
 
 function randomDelay(minMs = 3000, maxMs = 8000) {
@@ -490,7 +529,6 @@ async function getBrowserExecutablePath() {
 
 let isResetting = false;
 let isInitializing = false;
-let startupWatchdog = null;
 
 function cleanAllLockfiles(dirPath) {
   try {
@@ -556,6 +594,7 @@ async function resetClient(reason) {
     clearTimeout(startupWatchdog);
     startupWatchdog = null;
   }
+  stopAuthenticatedWatchdog();
   try {
     if (client) {
       logger.info('Destroying existing WhatsApp client and browser instance...');
@@ -621,6 +660,7 @@ async function doInitWhatsApp(io) {
     clearTimeout(startupWatchdog);
     startupWatchdog = null;
   }
+  stopAuthenticatedWatchdog();
 
   if (client) {
     client.removeAllListeners();
@@ -649,17 +689,20 @@ async function doInitWhatsApp(io) {
     puppeteerOptions.executablePath = executablePath;
   }
 
-  client = new Client({
+  const clientOptions = {
     authStrategy: new LocalAuth({ dataPath: config.sessionAuthDir }),
     puppeteer: puppeteerOptions
-  });
+  };
 
-  // Strip all listeners immediately after instantiation right before registering
-  // our handlers so that no duplicate listener registrations can exist on this client.
-  client.removeAllListeners();
+  if (config.pinnedWebVersion) {
+    clientOptions.webVersion = config.pinnedWebVersion;
+    clientOptions.webVersionCache = {
+      type: 'remote',
+      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html'
+    };
+  }
 
-  let hasLoggedAuthenticated = false;
-  let hasLoggedReady = false;
+  client = new Client(clientOptions);
 
   startupWatchdog = setTimeout(() => {
     if (connectionStatus === 'initializing') {
@@ -668,23 +711,102 @@ async function doInitWhatsApp(io) {
     }
   }, 90000);
 
-  client.on('loading_screen', (percent, message) => {
+  attachListeners(client);
+
+  await client.initialize();
+  return client;
+}
+
+function stopAuthenticatedWatchdog() {
+  if (authWatchdog) {
+    clearTimeout(authWatchdog);
+    authWatchdog = null;
+  }
+}
+
+function startAuthenticatedWatchdog() {
+  stopAuthenticatedWatchdog();
+  if (switchingAccount) return;
+
+  const timeoutMs = authRetryCount >= 3 ? 300000 : 90000;
+  logger.info(
+    { attempt: authRetryCount + 1, timeoutSec: timeoutMs / 1000 },
+    'Starting authenticated->ready watchdog timer'
+  );
+
+  authWatchdog = setTimeout(async () => {
+    if (switchingAccount) {
+      logger.info('Watchdog fired while switchingAccount is true — aborting recovery');
+      return;
+    }
+    if (connectionStatus === 'ready' || connectionStatus === 'connected') {
+      return;
+    }
+
+    authRetryCount++;
+    logger.warn(
+      { attempt: authRetryCount },
+      'Sheuli authenticated but `ready` did not fire within timeout — resetting and re-initializing...'
+    );
+
+    if (authRetryCount === 3) {
+      sendAlert(
+        '⚠️ Sheuli authenticated but never became ready after 3 attempts — may need attention'
+      ).catch((err) => {
+        logger.warn({ err: err?.message || err }, 'Failed to send watchdog Telegram alert');
+      });
+    }
+
+    try {
+      if (client) {
+        client.removeAllListeners();
+        try {
+          await client.destroy();
+        } catch {
+          // Ignore
+        }
+        client = null;
+      }
+      cleanAllLockfiles(config.sessionAuthDir);
+      await initWhatsApp(ioRef);
+    } catch (err) {
+      logger.error({ err: err?.message || err }, 'Error during watchdog client re-initialization');
+    }
+  }, timeoutMs);
+}
+
+function attachListeners(clientInstance) {
+  if (attachedClients.has(clientInstance)) {
+    logger.debug('Listeners already attached to this client instance — skipping duplicate wiring');
+    return;
+  }
+  attachedClients.add(clientInstance);
+
+  clientInstance.removeAllListeners();
+
+  let hasLoggedAuthenticated = false;
+  let hasLoggedReady = false;
+
+  clientInstance.on('loading_screen', (percent, message) => {
     logger.info(`WhatsApp Web loading: ${percent}% — ${message}`);
+    emitStatus('loading', { percent, message });
   });
 
-  client.on('change_state', (state) => {
+  clientInstance.on('change_state', (state) => {
     logger.info(`WhatsApp client state changed to: ${state}`);
   });
 
-  client.on('qr', async (qr) => {
+  clientInstance.on('qr', async (qr) => {
     if (startupWatchdog) {
       clearTimeout(startupWatchdog);
       startupWatchdog = null;
     }
-    emitStatus('qr');
+    stopAuthenticatedWatchdog();
+    authRetryCount = 0;
     try {
       const qrDataUrl = await qrcode.toDataURL(qr);
       lastQr = qrDataUrl;
+      emitStatus('qr', { qr: qrDataUrl });
       ioRef?.emit('whatsapp:qr', { qr: qrDataUrl });
       logger.info('QR code generated — scan it from the dashboard or terminal below');
       const qrcodeTerminal = await import('qrcode-terminal');
@@ -694,19 +816,40 @@ async function doInitWhatsApp(io) {
     }
   });
 
-  client.on('ready', () => {
+  clientInstance.on('authenticated', () => {
     if (startupWatchdog) {
       clearTimeout(startupWatchdog);
       startupWatchdog = null;
     }
-    emitStatus('connected');
+    lastQr = null;
+    ioRef?.emit('whatsapp:qr', { qr: null });
+    emitStatus('authenticated');
+    if (!hasLoggedAuthenticated) {
+      hasLoggedAuthenticated = true;
+      logger.info('WhatsApp authentication successful');
+    }
+    startAuthenticatedWatchdog();
+  });
+
+  clientInstance.on('ready', () => {
+    if (startupWatchdog) {
+      clearTimeout(startupWatchdog);
+      startupWatchdog = null;
+    }
+    stopAuthenticatedWatchdog();
+    authRetryCount = 0;
+    emitStatus('ready');
     if (!hasLoggedReady) {
       hasLoggedReady = true;
-      logger.info('Sheuli is connected to WhatsApp');
+      const widUser =
+        clientInstance.info?.wid?.user ||
+        (clientInstance.info?.wid?._serialized
+          ? clientInstance.info.wid._serialized.replace('@c.us', '').replace('@lid', '')
+          : 'unknown');
+      const pushname = clientInstance.info?.pushname || 'unknown';
+      logger.info(`READY — logged in as ${widUser} (${pushname})`);
     }
 
-    // FEATURE 1: recovery alert — only fires if we previously alerted about a
-    // disconnect/auth failure, never on the very first connect.
     if (hadConnectionIssue) {
       hadConnectionIssue = false;
       sendAlert('🟢 Sheuli is back online.').catch((err) => {
@@ -715,18 +858,12 @@ async function doInitWhatsApp(io) {
     }
   });
 
-  client.on('authenticated', () => {
-    if (!hasLoggedAuthenticated) {
-      hasLoggedAuthenticated = true;
-      logger.info('WhatsApp authentication successful');
-    }
-  });
-
-  client.on('auth_failure', async (msg) => {
+  clientInstance.on('auth_failure', async (msg) => {
     if (startupWatchdog) {
       clearTimeout(startupWatchdog);
       startupWatchdog = null;
     }
+    stopAuthenticatedWatchdog();
     if (switchingAccount) {
       logger.info({ msg }, 'auth_failure fired during intentional logout — ignoring auto-reconnect and alert');
       return;
@@ -740,11 +877,12 @@ async function doInitWhatsApp(io) {
     await resetClient('auth_failure');
   });
 
-  client.on('disconnected', async (reason) => {
+  clientInstance.on('disconnected', async (reason) => {
     if (startupWatchdog) {
       clearTimeout(startupWatchdog);
       startupWatchdog = null;
     }
+    stopAuthenticatedWatchdog();
     if (switchingAccount) {
       logger.info({ reason }, 'disconnected fired during intentional logout — ignoring auto-reconnect and alert');
       return;
@@ -758,20 +896,13 @@ async function doInitWhatsApp(io) {
     await resetClient(reason);
   });
 
-  // Defensive: guarantee a single 'message' listener even if something re-attaches
-  // one on this same client instance (a fresh Client is normally created on every
-  // reconnect, but this keeps that invariant true if that ever changes).
-  client.removeAllListeners('message');
-  client.on('message', async (message) => {
+  clientInstance.on('message', async (message) => {
     try {
       await handleIncomingMessage(message);
     } catch (err) {
       logger.error({ err: err.message }, 'Unhandled error while processing message');
     }
   });
-
-  await client.initialize();
-  return client;
 }
 
 export function getClient() {
@@ -815,6 +946,8 @@ export async function logoutWhatsApp({ clearHistory = false } = {}) {
       clearTimeout(startupWatchdog);
       startupWatchdog = null;
     }
+    stopAuthenticatedWatchdog();
+    authRetryCount = 0;
 
     if (client) {
       try {

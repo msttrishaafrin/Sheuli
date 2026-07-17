@@ -10,7 +10,7 @@ import { Server } from 'socket.io';
 import config from './config.js';
 import logger from './logger.js';
 import { requireAuth, COOKIE_NAME } from './middleware/auth.js';
-import { initWhatsApp, getConnectionStatus, getLastQr, destroyClient, getClientInfo } from './whatsapp.js';
+import { initWhatsApp, getConnectionStatus, getLastQr, destroyClient, getClientInfo, getConnectionDetails } from './whatsapp.js';
 import { getAllSettings, closeDb } from './db.js';
 import { getScheduleStatus } from './schedule.js';
 import { sendAlert } from './alerts.js';
@@ -59,6 +59,8 @@ app.set('trust proxy', 1);
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(cookieParser(config.sessionSecret));
+
+setSocketIo(io);
 
 // Intentionally unauthenticated — Railway (and any other platform) healthcheck
 // hits this directly with no session cookie.
@@ -112,7 +114,7 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
   logger.debug({ id: socket.id }, 'Dashboard client connected via WebSocket');
-  socket.emit('whatsapp:status', { status: getConnectionStatus(), info: getClientInfo() });
+  socket.emit('whatsapp:status', getConnectionDetails());
   const qr = getLastQr();
   if (qr) socket.emit('whatsapp:qr', { qr });
   socket.emit('schedule:status', getScheduleStatus(getAllSettings()));

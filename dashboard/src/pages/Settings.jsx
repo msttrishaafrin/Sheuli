@@ -9,11 +9,24 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const STATUS_LABEL = {
   initializing: { text: 'Starting up…', color: 'bg-yellow-400' },
   qr: { text: 'Waiting for QR scan', color: 'bg-yellow-400' },
+  authenticated: { text: '✅ Authenticated — starting up…', color: 'bg-blue-400' },
+  loading: { text: '⏳ Authenticated — loading chats…', color: 'bg-blue-400' },
+  ready: { text: 'Connected', color: 'bg-emerald-400' },
   connected: { text: 'Connected', color: 'bg-emerald-400' },
   disconnected: { text: 'Disconnected — reconnecting', color: 'bg-red-400' },
   auth_failure: { text: 'Authentication failed', color: 'bg-red-400' },
   logging_out: { text: 'Logging out…', color: 'bg-yellow-400' }
 };
+
+function getStatusDisplay(status, percent) {
+  if (status === 'loading') {
+    return {
+      text: `⏳ Authenticated — loading chats… ${percent || 0}%`,
+      color: 'bg-blue-400'
+    };
+  }
+  return STATUS_LABEL[status] || STATUS_LABEL.initializing;
+}
 
 function Toggle({ checked, onChange, disabled = false }) {
   return (
@@ -106,6 +119,7 @@ export default function Settings() {
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(true);
 
   const [waStatus, setWaStatus] = useState('initializing');
+  const [loadingPercent, setLoadingPercent] = useState(0);
   const [waInfo, setWaInfo] = useState(null);
   const [waQr, setWaQr] = useState(null);
   const [switchingAccount, setSwitchingAccount] = useState(false);
@@ -122,6 +136,7 @@ export default function Settings() {
       setDiagnostics(data);
       if (data.whatsapp) {
         setWaStatus(data.whatsapp.state);
+        if (data.whatsapp.loadingPercent !== undefined) setLoadingPercent(data.whatsapp.loadingPercent);
         if (data.whatsapp.number || data.whatsapp.name) {
           setWaInfo({ number: data.whatsapp.number, name: data.whatsapp.name });
         }
@@ -139,20 +154,41 @@ export default function Settings() {
     api.get('/settings/schedule').then(({ data }) => setSchedule(data));
     api.get('/status').then(({ data }) => {
       setWaStatus(data.connection);
+      if (data.loadingPercent !== undefined) setLoadingPercent(data.loadingPercent);
       setWaInfo(data.info);
       setSwitchingAccount(Boolean(data.switchingAccount));
-      if (data.connection === 'connected' || data.connection === 'logging_out') setWaQr(null);
+      if (
+        data.connection === 'authenticated' ||
+        data.connection === 'loading' ||
+        data.connection === 'ready' ||
+        data.connection === 'connected' ||
+        data.connection === 'logging_out'
+      ) {
+        setWaQr(null);
+      }
     });
     loadDiagnostics();
     const interval = setInterval(loadDiagnostics, 10000);
 
     const socket = getSocket();
-    const onWaStatus = ({ status, info }) => {
-      setWaStatus(status);
-      if (info !== undefined) setWaInfo(info);
-      if (status === 'logging_out') setSwitchingAccount(true);
-      if (status === 'connected' || status === 'logging_out') setWaQr(null);
-      if (status === 'qr' || status === 'connected') setSwitchingAccount(false);
+    const onWaStatus = (details) => {
+      const st = typeof details === 'string' ? details : details?.status || details?.connection || 'initializing';
+      setWaStatus(st);
+      if (details && typeof details === 'object') {
+        if (details.loadingPercent !== undefined) setLoadingPercent(details.loadingPercent);
+        if (details.info !== undefined) setWaInfo(details.info);
+      }
+      if (st === 'logging_out') setSwitchingAccount(true);
+      if (
+        st === 'authenticated' ||
+        st === 'loading' ||
+        st === 'ready' ||
+        st === 'connected' ||
+        st === 'logging_out'
+      ) {
+        setWaQr(null);
+      }
+      if (st === 'qr' || st === 'ready' || st === 'connected') setSwitchingAccount(false);
     };
     const onWaQr = ({ qr }) => setWaQr(qr);
 
@@ -296,8 +332,8 @@ export default function Settings() {
         <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-col gap-2">
             <div className="flex items-center gap-2">
-              <span className={`h-2.5 w-2.5 rounded-full ${(STATUS_LABEL[waStatus] || STATUS_LABEL.initializing).color} animate-pulse`} />
-              <span className="font-semibold text-petal">{(STATUS_LABEL[waStatus] || STATUS_LABEL.initializing).text}</span>
+              <span className={`h-2.5 w-2.5 rounded-full ${getStatusDisplay(waStatus, loadingPercent).color} animate-pulse`} />
+              <span className="font-semibold text-petal">{getStatusDisplay(waStatus, loadingPercent).text}</span>
             </div>
             <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm text-petal-dim">
               <p>
@@ -328,6 +364,9 @@ export default function Settings() {
             </div>
             <p className="text-center text-xs text-petal-dim">
               Open WhatsApp → Linked Devices → Link a Device, then scan this code.
+            </p>
+            <p className="text-center text-[11px] text-petal-dim/80">
+              QR refreshes automatically (~every 60s).
             </p>
           </div>
         )}

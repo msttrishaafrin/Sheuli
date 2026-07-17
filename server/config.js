@@ -29,6 +29,11 @@ export const config = {
   dbPath: path.join(storageDir, 'data', 'sheuli.db'),
   sessionAuthDir: path.join(storageDir, '.wwebjs_auth'),
 
+  // FIX 1: Pinned WhatsApp Web HTML version string and remote wppconnect cache pattern.
+  // When updating whatsapp-web.js or adapting to WhatsApp Web releases, check
+  // https://github.com/wppconnect-team/wa-version/tree/main/html for the latest stable version string.
+  pinnedWebVersion: process.env.WA_WEB_VERSION || '2.3000.1040300918-alpha',
+
   port: Number(process.env.PORT) || 3000,
   ownerName: process.env.OWNER_NAME || 'Reduan',
   timezone: process.env.TIMEZONE || 'Asia/Dhaka',

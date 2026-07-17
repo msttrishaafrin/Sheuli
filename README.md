@@ -431,6 +431,7 @@ future redeploy — you won't need to re-scan unless you unlink the device or de
 - **QR code never appears / Puppeteer crashes on the VPS**: almost always a missing Chromium
   dependency — re-run the `apt install` command in step 2 and check `pm2 logs sheuli` for the
   specific missing `.so` file.
+- **Phone shows linked, but dashboard is stuck on "Waiting for QR scan" or `ready` times out**: Sheuli uses a remote HTML version cache (`WA_WEB_VERSION` / `pinnedWebVersion`) to ensure compatibility when WhatsApp silently updates its web frontend. If `ready` does not fire within 90 seconds after `authenticated`, Sheuli's watchdog automatically cleans stale lockfiles and re-initializes the client up to 3 times (and sends a Telegram alert if all 3 fail). If you experience repeated link hangs, open WhatsApp on your phone (`Settings → Linked Devices`), log out of old or duplicate "Google Chrome" sessions, and scan the fresh QR code on the dashboard.
 - **"WhatsApp disconnected" loops repeatedly**: usually means the linked session was invalidated
   from your phone (Settings → Linked Devices). Delete the `.wwebjs_auth/` folder (under `STORAGE_DIR` — the
   project root locally, the Volume on Railway/a VPS) and re-scan.

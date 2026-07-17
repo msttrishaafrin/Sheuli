@@ -5,11 +5,24 @@ import getSocket from '../lib/socket.js';
 const STATUS_LABEL = {
   initializing: { text: 'Starting up…', color: 'bg-yellow-400' },
   qr: { text: 'Waiting for QR scan', color: 'bg-yellow-400' },
+  authenticated: { text: '✅ Authenticated — starting up…', color: 'bg-blue-400' },
+  loading: { text: '⏳ Authenticated — loading chats…', color: 'bg-blue-400' },
+  ready: { text: 'Connected', color: 'bg-emerald-400' },
   connected: { text: 'Connected', color: 'bg-emerald-400' },
   disconnected: { text: 'Disconnected — reconnecting', color: 'bg-red-400' },
   auth_failure: { text: 'Authentication failed', color: 'bg-red-400' },
   logging_out: { text: 'Logging out…', color: 'bg-yellow-400' }
 };
+
+function getStatusDisplay(status, percent) {
+  if (status === 'loading') {
+    return {
+      text: `⏳ Authenticated — loading chats… ${percent || 0}%`,
+      color: 'bg-blue-400'
+    };
+  }
+  return STATUS_LABEL[status] || STATUS_LABEL.initializing;
+}
 
 function StatCard({ label, value, hint }) {
   return (
@@ -36,6 +49,8 @@ function formatInZone(iso, timezone) {
 
 export default function Overview() {
   const [connection, setConnection] = useState('initializing');
+  const [loadingPercent, setLoadingPercent] = useState(0);
+  const [info, setInfo] = useState(null);
   const [qr, setQr] = useState(null);
   const [stats, setStats] = useState({
     messagesReceived: 0,
@@ -53,8 +68,18 @@ export default function Overview() {
     try {
       const { data } = await api.get('/status');
       setConnection(data.connection);
+      if (data.loadingPercent !== undefined) setLoadingPercent(data.loadingPercent);
+      if (data.info !== undefined) setInfo(data.info);
       setStats(data.stats);
-      if (data.connection === 'connected' || data.connection === 'logging_out') setQr(null);
+      if (
+        data.connection === 'authenticated' ||
+        data.connection === 'loading' ||
+        data.connection === 'ready' ||
+        data.connection === 'connected' ||
+        data.connection === 'logging_out'
+      ) {
+        setQr(null);
+      }
     } catch {
       // ignore, socket will keep us updated
     }
@@ -76,9 +101,22 @@ export default function Overview() {
     fetchSchedule();
 
     const socket = getSocket();
-    const onStatus = ({ status }) => {
-      setConnection(status);
-      if (status === 'connected' || status === 'logging_out') setQr(null);
+    const onStatus = (details) => {
+      const st = typeof details === 'string' ? details : details?.status || details?.connection || 'initializing';
+      setConnection(st);
+      if (details && typeof details === 'object') {
+        if (details.loadingPercent !== undefined) setLoadingPercent(details.loadingPercent);
+        if (details.info !== undefined) setInfo(details.info);
+      }
+      if (
+        st === 'authenticated' ||
+        st === 'loading' ||
+        st === 'ready' ||
+        st === 'connected' ||
+        st === 'logging_out'
+      ) {
+        setQr(null);
+      }
     };
     const onQr = ({ qr: qrData }) => setQr(qrData);
     const onSettings = (settings) => setAutoReplyEnabled(Boolean(settings.autoReplyEnabled));
@@ -116,7 +154,7 @@ export default function Overview() {
     }
   };
 
-  const statusInfo = STATUS_LABEL[connection] || STATUS_LABEL.initializing;
+  const statusInfo = getStatusDisplay(connection, loadingPercent);
   const isScheduleMode = scheduleStatus.mode === 'schedule';
   const active = isScheduleMode ? scheduleStatus.active : autoReplyEnabled;
   const nextChangeLabel = isScheduleMode ? formatInZone(scheduleStatus.nextChangeAt, scheduleStatus.timezone) : null;
@@ -182,12 +220,15 @@ export default function Overview() {
               <p className="text-center text-xs text-petal-dim">
                 Open WhatsApp → Linked Devices → Link a Device, then scan this code.
               </p>
+              <p className="text-center text-[11px] text-petal-dim/80">
+                QR refreshes automatically (~every 60s).
+              </p>
             </div>
           )}
 
-          {connection === 'connected' && (
+          {(connection === 'connected' || connection === 'ready') && (
             <p className="mt-3 text-sm text-petal-dim">
-              WhatsApp is linked. Sheuli can now watch your messages.
+              WhatsApp is linked{info?.number ? ` (+${info.number})` : ''}{info?.name ? ` as ${info.name}` : ''}. Sheuli can now watch your messages.
             </p>
           )}
         </div>

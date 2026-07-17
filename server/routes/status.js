@@ -1,14 +1,17 @@
 import { Router } from 'express';
 import { getTodayStats } from '../db.js';
-import { getConnectionStatus, getClientInfo, isSwitchingAccount } from '../whatsapp.js';
+import { getConnectionStatus, getClientInfo, isSwitchingAccount, getConnectionDetails } from '../whatsapp.js';
 
 const router = Router();
 
 router.get('/', (req, res) => {
+  const details = getConnectionDetails();
   res.json({
-    connection: getConnectionStatus(),
-    info: getClientInfo(),
-    switchingAccount: isSwitchingAccount(),
+    connection: details.status,
+    info: details.info,
+    switchingAccount: details.switchingAccount,
+    loadingPercent: details.loadingPercent,
+    loadingMessage: details.loadingMessage,
     stats: getTodayStats()
   });
 });
